@@ -1,5 +1,5 @@
-from configs import transforms_config
-from configs.paths_config import dataset_paths
+from encoder4editing.configs import transforms_config
+from encoder4editing.configs.paths_config import dataset_paths
 
 
 DATASETS = {

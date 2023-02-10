@@ -1,5 +1,5 @@
 from argparse import ArgumentParser
-from configs.paths_config import model_paths
+from encoder4editing.configs.paths_config import model_paths
 
 
 class TrainOptions:
@@ -78,6 +78,8 @@ class TrainOptions:
                                  help='Path to training checkpoint, works when --save_training_data was set to True')
         self.parser.add_argument('--update_param_list', nargs='+', type=str, default=None,
                                  help="Name of training parameters to update the loaded training checkpoint")
+        self.parser.add_argument('--use_amp', action='store_true',
+                                 help='Use Automatic Mixed Precision')
 
     def parse(self):
         opts = self.parser.parse_args()

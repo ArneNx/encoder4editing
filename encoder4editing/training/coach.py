@@ -2,25 +2,29 @@ import os
 import random
 import matplotlib
 import matplotlib.pyplot as plt
+from contextlib import nullcontext
 
 matplotlib.use('Agg')
 
 import torch
 from torch import nn, autograd
 from torch.utils.data import DataLoader
-from torch.utils.tensorboard import SummaryWriter
+# from torch.utils.tensorboard import SummaryWriter
 import torch.nn.functional as F
+from torch.cuda.amp import autocast, GradScaler
 
-from utils import common, train_utils
-from criteria import id_loss, moco_loss
-from configs import data_configs
-from datasets.images_dataset import ImagesDataset
-from criteria.lpips.lpips import LPIPS
-from models.psp import pSp
-from models.latent_codes_pool import LatentCodesPool
-from models.discriminator import LatentCodesDiscriminator
-from models.encoders.psp_encoders import ProgressiveStage
-from training.ranger import Ranger
+from encoder4editing.utils import common, train_utils
+from encoder4editing.criteria import id_loss, moco_loss
+from encoder4editing.configs import data_configs
+from encoder4editing.datasets.images_dataset import ImagesDataset
+from encoder4editing.criteria.lpips.lpips import LPIPS
+from encoder4editing.models.psp import pSp
+from encoder4editing.models.latent_codes_pool import LatentCodesPool
+from encoder4editing.models.discriminator import LatentCodesDiscriminator
+from encoder4editing.models.encoders.psp_encoders import ProgressiveStage
+from encoder4editing.training.ranger import Ranger
+
+from xaug.dataset.ffcv_imagenet_loader import FFCVDatasetLoader
 
 random.seed(0)
 torch.manual_seed(0)
@@ -59,22 +63,30 @@ class Coach:
             self.fake_w_pool = LatentCodesPool(self.opts.w_pool_size)
 
         # Initialize dataset
-        self.train_dataset, self.test_dataset = self.configure_datasets()
-        self.train_dataloader = DataLoader(self.train_dataset,
-                                           batch_size=self.opts.batch_size,
-                                           shuffle=True,
-                                           num_workers=int(self.opts.workers),
-                                           drop_last=True)
-        self.test_dataloader = DataLoader(self.test_dataset,
-                                          batch_size=self.opts.test_batch_size,
-                                          shuffle=False,
-                                          num_workers=int(self.opts.test_workers),
-                                          drop_last=True)
+
+        ds_loader = FFCVDatasetLoader(dataset_cls="ImageNet", batch_size=self.opts.batch_size)
+        transforms = ds_loader.get_transforms(train_data_mean= [0.485, 0.456, 0.406], train_data_std=[0.229, 0.224, 0.225], apply_augmentation=True, train_max_res=224, val_res=224)
+
+        datasets = ds_loader.get_datasets(data_dir="/work/", orig_data_dir="/data/image_classification/ImageNet")
+
+        data_loaders = ds_loader.get_data_loaders(datasets, transforms, seed=42, valid_size=0.01, shuffle=True, num_workers=self.opts.workers, in_memory=True)
+        self.train_dataloader, self.test_dataloader = data_loaders["train"], data_loaders["test"]
+        # self.train_dataset, self.test_dataset = self.configure_datasets()
+        # self.train_dataloader = DataLoader(self.train_dataset,
+        #                                    batch_size=self.opts.batch_size,
+        #                                    shuffle=True,
+        #                                    num_workers=int(self.opts.workers),
+        #                                    drop_last=True)
+        # self.test_dataloader = DataLoader(self.test_dataset,
+        #                                   batch_size=self.opts.test_batch_size,
+        #                                   shuffle=False,
+        #                                   num_workers=int(self.opts.test_workers),
+        #                                   drop_last=True)
 
         # Initialize logger
         log_dir = os.path.join(opts.exp_dir, 'logs')
         os.makedirs(log_dir, exist_ok=True)
-        self.logger = SummaryWriter(log_dir=log_dir)
+        # self.logger = SummaryWriter(log_dir=log_dir)
 
         # Initialize checkpoint dir
         self.checkpoint_dir = os.path.join(opts.exp_dir, 'checkpoints')
@@ -86,6 +98,9 @@ class Coach:
         if prev_train_checkpoint is not None:
             self.load_from_train_checkpoint(prev_train_checkpoint)
             prev_train_checkpoint = None
+
+        if self.opts.use_amp:
+            self.scaler = GradScaler()
 
     def load_from_train_checkpoint(self, ckpt):
         print('Loading previous training data...')
@@ -109,14 +124,21 @@ class Coach:
         while self.global_step < self.opts.max_steps:
             for batch_idx, batch in enumerate(self.train_dataloader):
                 loss_dict = {}
-                if self.is_training_discriminator():
-                    loss_dict = self.train_discriminator(batch)
-                x, y, y_hat, latent = self.forward(batch)
-                loss, encoder_loss_dict, id_logs = self.calc_loss(x, y, y_hat, latent)
-                loss_dict = {**loss_dict, **encoder_loss_dict}
+                with autocast() if self.opts.use_amp else nullcontext():
+                    if self.is_training_discriminator():
+                        loss_dict = self.train_discriminator(batch)
+                    x, y, y_hat, latent = self.forward(batch)
+                    loss, encoder_loss_dict, id_logs = self.calc_loss(x, y, y_hat, latent)
+                    loss_dict = {**loss_dict, **encoder_loss_dict}
+                if self.opts.use_amp:
+                    losss = self.scaler.scale(loss) 
                 self.optimizer.zero_grad()
                 loss.backward()
-                self.optimizer.step()
+                if self.opts.use_amp:
+                    self.scaler.step(self.optimizer)
+                    self.scaler.update()
+                else:
+                    self.optimizer.step()
 
                 # Logging related
                 if self.global_step % self.opts.image_interval == 0 or (
@@ -215,6 +237,7 @@ class Coach:
         print('Loading dataset for {}'.format(self.opts.dataset_type))
         dataset_args = data_configs.DATASETS[self.opts.dataset_type]
         transforms_dict = dataset_args['transforms'](self.opts).get_transforms()
+
         train_dataset = ImagesDataset(source_root=dataset_args['train_source_root'],
                                       target_root=dataset_args['train_target_root'],
                                       source_transform=transforms_dict['transform_source'],
@@ -285,8 +308,9 @@ class Coach:
         return x, y, y_hat, latent
 
     def log_metrics(self, metrics_dict, prefix):
-        for key, value in metrics_dict.items():
-            self.logger.add_scalar('{}/{}'.format(prefix, key), value, self.global_step)
+        # for key, value in metrics_dict.items():
+            # self.logger.add_scalar('{}/{}'.format(prefix, key), value, self.global_step)
+        pass
 
     def print_metrics(self, metrics_dict, prefix):
         print('Metrics for {}, step {}'.format(prefix, self.global_step))
@@ -312,10 +336,10 @@ class Coach:
         step = self.global_step
         if log_latest:
             step = 0
-        if subscript:
-            path = os.path.join(self.logger.log_dir, name, '{}_{:04d}.jpg'.format(subscript, step))
-        else:
-            path = os.path.join(self.logger.log_dir, name, '{:04d}.jpg'.format(step))
+        # if subscript:
+        #     path = os.path.join(self.logger.log_dir, name, '{}_{:04d}.jpg'.format(subscript, step))
+        # else:
+        #     path = os.path.join(self.logger.log_dir, name, '{:04d}.jpg'.format(step))
         os.makedirs(os.path.dirname(path), exist_ok=True)
         fig.savefig(path)
         plt.close(fig)
@@ -374,7 +398,7 @@ class Coach:
         for p in model.parameters():
             p.requires_grad = flag
 
-    def train_discriminator(self, batch):
+    def train_discriminator(self, batch):  # Trains discriminator network to distinguish fake and real latents
         loss_dict = {}
         x, _ = batch
         x = x.to(self.device).float()
@@ -423,8 +447,11 @@ class Coach:
             return loss_dict
 
     def sample_real_and_fake_latents(self, x):
-        sample_z = torch.randn(self.opts.batch_size, 512, device=self.device)
-        real_w = self.net.decoder.get_latent(sample_z)
+        z_dim = self.net.decoder.z_dim 
+        c_dim = self.net.decoder.c_dim 
+        sample_z = torch.randn(self.opts.batch_size, z_dim, device=self.device)
+        sample_c = torch.randn(self.opts.batch_size, c_dim, device=self.device)  #TODO pass through learned embedder?
+        real_w = self.net.decoder.get_latent(sample_z, sample_c)
         fake_w = self.net.encoder(x)
         if self.opts.start_from_latent_avg:
             fake_w = fake_w + self.net.latent_avg.repeat(fake_w.shape[0], 1, 1)

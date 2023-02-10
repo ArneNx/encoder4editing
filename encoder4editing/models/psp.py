@@ -1,12 +1,14 @@
 import matplotlib
 
 matplotlib.use('Agg')
+import os
 import torch
 from torch import nn
-from models.encoders import psp_encoders
-from models.stylegan2.model import Generator
-from configs.paths_config import model_paths
-
+from encoder4editing.models.encoders import psp_encoders
+# from models.stylegan2.model import Generator
+from encoder4editing.configs.paths_config import model_paths
+import legacy
+from .generator_wrapper import GeneratorWrapper
 
 def get_keys(d, name):
     if 'state_dict' in d:
@@ -22,10 +24,22 @@ class pSp(nn.Module):
         self.opts = opts
         # Define architecture
         self.encoder = self.set_encoder()
-        self.decoder = Generator(opts.stylegan_size, 512, 8, channel_multiplier=2)
+        # self.decoder = Generator(opts.stylegan_size, 512, 8, channel_multiplier=2)
+        # Load networks.
+        network_name = "imagenet256" 
+        network_pkl = f"/pretrained_checkpoints/{network_name}.pkl"
+        if not os.path.isfile(network_pkl):
+            raise Exception(f"File {network_pkl} does not exist. Please download it from the StyleGAN-XL repo.")
+        print('Loading networks from "%s"...' % network_pkl)
+        device = torch.device('cuda')
+        with open(network_pkl, "rb") as fp:
+            generator = legacy.load_network_pkl(fp)['G_ema'].to(device) 
+        self.decoder = GeneratorWrapper(generator)
+         
+        
         self.face_pool = torch.nn.AdaptiveAvgPool2d((256, 256))
         # Load weights if needed
-        self.load_weights()
+        # self.load_weights()
 
     def set_encoder(self):
         if self.opts.encoder_type == 'GradualStyleEncoder':
@@ -43,7 +57,7 @@ class pSp(nn.Module):
             print('Loading e4e over the pSp framework from checkpoint: {}'.format(self.opts.checkpoint_path))
             ckpt = torch.load(self.opts.checkpoint_path, map_location='cpu')
             self.encoder.load_state_dict(get_keys(ckpt, 'encoder'), strict=True)
-            self.decoder.load_state_dict(get_keys(ckpt, 'decoder'), strict=True)
+            # self.decoder.load_state_dict(get_keys(ckpt, 'decoder'), strict=True)
             self.__load_latent_avg(ckpt)
         else:
             print('Loading encoders weights from irse50!')
@@ -51,7 +65,7 @@ class pSp(nn.Module):
             self.encoder.load_state_dict(encoder_ckpt, strict=False)
             print('Loading decoder weights from pretrained!')
             ckpt = torch.load(self.opts.stylegan_weights)
-            self.decoder.load_state_dict(ckpt['g_ema'], strict=False)
+            # self.decoder.load_state_dict(ckpt['g_ema'], strict=False)
             self.__load_latent_avg(ckpt, repeat=self.encoder.style_count)
 
     def forward(self, x, resize=True, latent_mask=None, input_code=False, randomize_noise=True,
@@ -78,7 +92,7 @@ class pSp(nn.Module):
                     codes[:, i] = 0
 
         input_is_latent = not input_code
-        images, result_latent = self.decoder([codes],
+        images, result_latent = self.decoder(codes,
                                              input_is_latent=input_is_latent,
                                              randomize_noise=randomize_noise,
                                              return_latents=return_latents)

@@ -12,8 +12,8 @@ from argparse import Namespace
 sys.path.append(".")
 sys.path.append("..")
 
-from options.train_options import TrainOptions
-from training.coach import Coach
+from encoder4editing.options.train_options import TrainOptions
+from encoder4editing.training.coach import Coach
 
 
 def main():
@@ -65,9 +65,9 @@ def is_valid_progressive_steps(opts, num_style_layers):
 
 
 def create_initial_experiment_dir(opts):
-	if os.path.exists(opts.exp_dir):
-		raise Exception('Oops... {} already exists'.format(opts.exp_dir))
-	os.makedirs(opts.exp_dir)
+	# if os.path.exists(opts.exp_dir):
+	# 	raise Exception('Oops... {} already exists'.format(opts.exp_dir))
+	os.makedirs(opts.exp_dir, exist_ok=True)
 
 	opts_dict = vars(opts)
 	pprint.pprint(opts_dict)

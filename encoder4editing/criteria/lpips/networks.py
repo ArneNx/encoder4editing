@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 from torchvision import models
 
-from criteria.lpips.utils import normalize_activation
+from encoder4editing.criteria.lpips.utils import normalize_activation
 
 
 def get_network(net_type: str):
@@ -67,7 +67,10 @@ class SqueezeNet(BaseNet):
     def __init__(self):
         super(SqueezeNet, self).__init__()
 
-        self.layers = models.squeezenet1_1(True).features
+        model = models.squeezenet1_1(True)
+        weights = torch.load("/pretrained_checkpoints/squeezenet1_1.pth")
+        model.load_state_dict(weights)
+        self.layers = model.features
         self.target_layers = [2, 5, 8, 10, 11, 12, 13]
         self.n_channels_list = [64, 128, 256, 384, 384, 512, 512]
 
@@ -77,8 +80,10 @@ class SqueezeNet(BaseNet):
 class AlexNet(BaseNet):
     def __init__(self):
         super(AlexNet, self).__init__()
-
-        self.layers = models.alexnet(True).features
+        model = models.alexnet()
+        weights = torch.load("/pretrained_checkpoints/alexnet.pth")
+        model.load_state_dict(weights)
+        self.layers = model.features
         self.target_layers = [2, 5, 8, 10, 12]
         self.n_channels_list = [64, 192, 384, 256, 256]
 
@@ -89,7 +94,10 @@ class VGG16(BaseNet):
     def __init__(self):
         super(VGG16, self).__init__()
 
-        self.layers = models.vgg16(True).features
+        model = models.vgg16(True)
+        weights = torch.load("/pretrained_checkpoints/vgg16.pth")
+        model.load_state_dict(weights)
+        self.layers = model.features
         self.target_layers = [4, 9, 16, 23, 30]
         self.n_channels_list = [64, 128, 256, 512, 512]
 
