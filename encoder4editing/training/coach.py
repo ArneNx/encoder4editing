@@ -65,7 +65,7 @@ class Coach:
         # Initialize dataset
 
         ds_loader = FFCVDatasetLoader(dataset_cls="ImageNet", batch_size=self.opts.batch_size)
-        transforms = ds_loader.get_transforms(train_data_mean= [0.485, 0.456, 0.406], train_data_std=[0.229, 0.224, 0.225], apply_augmentation=True, train_max_res=224, val_res=224)
+        transforms = ds_loader.get_transforms(train_data_mean= [0.485, 0.456, 0.406], train_data_std=[0.229, 0.224, 0.225], apply_augmentation=True, train_max_res=256, val_res=256)
 
         datasets = ds_loader.get_datasets(data_dir="/work/", orig_data_dir="/data/image_classification/ImageNet")
 
@@ -300,11 +300,12 @@ class Coach:
         return loss, loss_dict, id_logs
 
     def forward(self, batch):
-        x, y = batch
+        x, _ = batch
+        y = x  # This should be a different view?
         x, y = x.to(self.device).float(), y.to(self.device).float()
         y_hat, latent = self.net.forward(x, return_latents=True)
-        if self.opts.dataset_type == "cars_encode":
-            y_hat = y_hat[:, :, 32:224, :]
+        # if self.opts.dataset_type == "cars_encode":
+        #     y_hat = y_hat[:, :, 32:224, :]
         return x, y, y_hat, latent
 
     def log_metrics(self, metrics_dict, prefix):
@@ -329,7 +330,7 @@ class Coach:
                 for key in id_logs[i]:
                     cur_im_data[key] = id_logs[i][key]
             im_data.append(cur_im_data)
-        self.log_images(title, im_data=im_data, subscript=subscript)
+        # self.log_images(title, im_data=im_data, subscript=subscript)
 
     def log_images(self, name, im_data, subscript=None, log_latest=False):
         fig = common.vis_faces(im_data)

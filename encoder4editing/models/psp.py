@@ -34,18 +34,19 @@ class pSp(nn.Module):
         device = torch.device('cuda')
         with open(network_pkl, "rb") as fp:
             generator = legacy.load_network_pkl(fp)['G_ema'].to(device) 
-        self.decoder = GeneratorWrapper(generator)
+        self.decoder = GeneratorWrapper(generator, device)
          
         
         self.face_pool = torch.nn.AdaptiveAvgPool2d((256, 256))
         # Load weights if needed
-        # self.load_weights()
+        self.load_weights()
 
     def set_encoder(self):
+        print("Using encoder:", self.opts.encoder_type)
         if self.opts.encoder_type == 'GradualStyleEncoder':
             encoder = psp_encoders.GradualStyleEncoder(50, 'ir_se', self.opts)
         elif self.opts.encoder_type == 'Encoder4Editing':
-            encoder = psp_encoders.Encoder4Editing(50, 'ir_se', self.opts)
+            encoder = psp_encoders.Encoder4Editing(50, 32, 'ir_se', self.opts, )
         elif self.opts.encoder_type == 'SingleStyleCodeEncoder':
             encoder = psp_encoders.BackboneEncoderUsingLastLayerIntoW(50, 'ir_se', self.opts)
         else:
@@ -63,10 +64,10 @@ class pSp(nn.Module):
             print('Loading encoders weights from irse50!')
             encoder_ckpt = torch.load(model_paths['ir_se50'])
             self.encoder.load_state_dict(encoder_ckpt, strict=False)
-            print('Loading decoder weights from pretrained!')
-            ckpt = torch.load(self.opts.stylegan_weights)
+            # print('Loading decoder weights from pretrained!')
+            # ckpt = torch.load(self.opts.stylegan_weights)
             # self.decoder.load_state_dict(ckpt['g_ema'], strict=False)
-            self.__load_latent_avg(ckpt, repeat=self.encoder.style_count)
+            self.__load_latent_avg({}, repeat=self.encoder.style_count)
 
     def forward(self, x, resize=True, latent_mask=None, input_code=False, randomize_noise=True,
                 inject_latent=None, return_latents=False, alpha=None):
@@ -97,8 +98,8 @@ class pSp(nn.Module):
                                              randomize_noise=randomize_noise,
                                              return_latents=return_latents)
 
-        if resize:
-            images = self.face_pool(images)
+        # if resize:
+        #     images = self.face_pool(images)
 
         if return_latents:
             return images, result_latent

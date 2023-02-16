@@ -122,7 +122,7 @@ class GradualStyleEncoder(Module):
 
 
 class Encoder4Editing(Module):
-    def __init__(self, num_layers, mode='ir', opts=None):
+    def __init__(self, num_layers, style_count, mode='ir', opts=None):
         super(Encoder4Editing, self).__init__()
         assert num_layers in [50, 100, 152], 'num_layers should be 50,100, or 152'
         assert mode in ['ir', 'ir_se'], 'mode should be ir or ir_se'
@@ -143,8 +143,9 @@ class Encoder4Editing(Module):
         self.body = Sequential(*modules)
 
         self.styles = nn.ModuleList()
-        log_size = int(math.log(opts.stylegan_size, 2))
-        self.style_count = 2 * log_size - 2
+        # log_size = int(math.log(opts.stylegan_size, 2))
+        # self.style_count = 2 * log_size - 2
+        self.style_count = style_count
         self.coarse_ind = 3
         self.middle_ind = 7
 

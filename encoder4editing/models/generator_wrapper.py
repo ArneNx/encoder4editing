@@ -5,16 +5,19 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 class GeneratorWrapper(nn.Module):
-    def __init__(self, generator) -> None:
+    def __init__(self, generator, device) -> None:
         super().__init__()
+        self.device = device
         self.generator = generator
         self.z_dim = generator.z_dim
         self.c_dim = generator.c_dim
 
-    # def mean_latent(self, n_sample):
-    #     latent_in = torch.randn(n_sample, 512, device=self.generator.device)
-    #     latent_out = self.generator.mapping(latent_in, None)
-    #     return latent_out.mean(0, keepdim=True)
+    def mean_latent(self, n_sample):
+        latent_in = torch.randn(n_sample, self.z_dim, device=self.device)
+        c_in = torch.randn(n_sample, self.c_dim, device=self.device)  # TODO: use something real
+        latent_out = self.generator.mapping(latent_in, c_in)
+        print(latent_out.shape)
+        return latent_out.mean(0, keepdim=True).mean(1)  # TODO: check this!!
 
     def get_latent(self, z, c):
         return self.generator.mapping(z, c)
@@ -31,10 +34,10 @@ class GeneratorWrapper(nn.Module):
             noise=None,
             randomize_noise=True,
     ):
-        if input_is_latent:
-            raise NotImplementedError(
-                "input_is_latent is not supported in GeneratorWrapper"
-            )
+        # if input_is_latent:
+        #     raise NotImplementedError(
+        #         "input_is_latent is not supported in GeneratorWrapper"
+        #     )
             # styles = G_original.mapping(z_samples, c_samples, truncation_psi=0.5)
 
         # territory_indicator_ws = [get_morphed_w_code(styles.unsqueeze(0), w_batch) for w_code in w_samples]
@@ -46,4 +49,4 @@ class GeneratorWrapper(nn.Module):
         # if return_latents:
         #     return image, styles
         # else:
-        return image, None
+        return image, style_codes
