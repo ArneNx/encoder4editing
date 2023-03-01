@@ -80,6 +80,10 @@ class TrainOptions:
                                  help="Name of training parameters to update the loaded training checkpoint")
         self.parser.add_argument('--use_amp', action='store_true',
                                  help='Use Automatic Mixed Precision')
+        self.parser.add_argument('--encode_to_z', action='store_true',
+                                 help='Encode to z space instead of w space')
+        self.parser.add_argument('--grad_accumulation_steps', default=1, type=int)
+        self.parser.add_argument('--wandb_mode', default="offline", type=str)
 
     def parse(self):
         opts = self.parser.parse_args()

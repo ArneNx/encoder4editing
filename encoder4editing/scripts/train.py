@@ -7,6 +7,8 @@ import math
 import sys
 import pprint
 import torch
+import wandb
+from wandb_osh.hooks import TriggerWandbSyncHook  # <-- New!
 from argparse import Namespace
 
 sys.path.append(".")
@@ -18,6 +20,11 @@ from encoder4editing.training.coach import Coach
 
 def main():
 	opts = TrainOptions().parse()
+	trigger_sync = None
+	if opts.wandb_mode == "offline":
+		os.environ["WANDB_MODE"] = "offline"
+		trigger_sync = TriggerWandbSyncHook(communication_dir="/scratch_emmy/outputs/.wandb_commdir")  # <--- New!
+	run = wandb.init(project="e4e", entity="arnenix", resume=False, dir="/scratch_emmy/outputs")
 	previous_train_ckpt = None
 	if opts.resume_training_from_ckpt:
 		opts, previous_train_ckpt = load_train_checkpoint(opts)
@@ -25,9 +32,12 @@ def main():
 		setup_progressive_steps(opts)
 		create_initial_experiment_dir(opts)
 
-	coach = Coach(opts, previous_train_ckpt)
-	coach.train()
-
+	wandb.config.update(
+		vars(opts)	
+	)  
+	with run:
+		coach = Coach(opts, previous_train_ckpt, trigger_sync=trigger_sync)
+		coach.train()
 
 def load_train_checkpoint(opts):
 	train_ckpt_path = opts.resume_training_from_ckpt

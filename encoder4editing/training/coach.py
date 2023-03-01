@@ -3,7 +3,7 @@ import random
 import matplotlib
 import matplotlib.pyplot as plt
 from contextlib import nullcontext
-
+import wandb
 matplotlib.use('Agg')
 
 import torch
@@ -30,58 +30,67 @@ random.seed(0)
 torch.manual_seed(0)
 
 
-class Coach:
-    def __init__(self, opts, prev_train_checkpoint=None):
-        self.opts = opts
+def move_to_device(model, gpu=True, multi_gpu=True, channels_last=False):
+    """
+    Moves given model to GPU(s) if they are available
+    :param model: (torch.nn.Module) model to move
+    :param gpu: (bool) if True attempt to move to GPU
+    :param multi_gpu: (bool) if True attempt to use multi-GPU
+    :return: torch.nn.Module, str
+    """
+    device = "cuda" if torch.cuda.is_available() and gpu else "cpu"
+    if multi_gpu and torch.cuda.device_count() > 1:
+        print("Using ", torch.cuda.device_count(), "GPUs")
+        model = nn.DataParallel(model)
+    if channels_last:
+        model = model.to(device, memory_format=torch.channels_last)
+    else:
+        model = model.to(device)
+    return model, device
 
+class Coach:
+    def __init__(self, opts, prev_train_checkpoint=None, trigger_sync=None):
+        self.opts = opts
+        self.trigger_sync = trigger_sync
         self.global_step = 0
 
         self.device = 'cuda:0'
         self.opts.device = self.device
         # Initialize network
-        self.net = pSp(self.opts).to(self.device)
+        self.net, self.device = move_to_device(pSp(self.opts))
+        self.opts.device = self.device
 
         # Initialize loss
         if self.opts.lpips_lambda > 0:
-            self.lpips_loss = LPIPS(net_type=self.opts.lpips_type).to(self.device).eval()
+            self.lpips_loss = move_to_device(LPIPS(net_type=self.opts.lpips_type))[0].eval()
         if self.opts.id_lambda > 0:
             if 'ffhq' in self.opts.dataset_type or 'celeb' in self.opts.dataset_type:
-                self.id_loss = id_loss.IDLoss().to(self.device).eval()
+                self.id_loss = move_to_device(id_loss.IDLoss())[0].eval()
             else:
-                self.id_loss = moco_loss.MocoLoss(opts).to(self.device).eval()
-        self.mse_loss = nn.MSELoss().to(self.device).eval()
+                self.id_loss = move_to_device(moco_loss.MocoLoss(opts))[0].eval()
+        self.mse_loss = move_to_device(nn.MSELoss())[0].eval()
+        
 
         # Initialize optimizer
         self.optimizer = self.configure_optimizers()
 
         # Initialize discriminator
         if self.opts.w_discriminator_lambda > 0:
-            self.discriminator = LatentCodesDiscriminator(512, 4).to(self.device)
+            self.discriminator = move_to_device(LatentCodesDiscriminator(512, 4))[0]
             self.discriminator_optimizer = torch.optim.Adam(list(self.discriminator.parameters()),
                                                             lr=opts.w_discriminator_lr)
             self.real_w_pool = LatentCodesPool(self.opts.w_pool_size)
             self.fake_w_pool = LatentCodesPool(self.opts.w_pool_size)
 
         # Initialize dataset
-
+        if "imagenet" not in opts.dataset_type:
+            raise ValueError("Only ImageNet is supported for now")
+        resolution = int(opts.dataset_type.split("_")[-1])
         ds_loader = FFCVDatasetLoader(dataset_cls="ImageNet", batch_size=self.opts.batch_size)
-        transforms = ds_loader.get_transforms(train_data_mean= [0.485, 0.456, 0.406], train_data_std=[0.229, 0.224, 0.225], apply_augmentation=True, train_max_res=256, val_res=256)
-
+        transforms = ds_loader.get_transforms(train_data_mean= [0.485, 0.456, 0.406], train_data_std=[0.229, 0.224, 0.225], apply_augmentation=True, train_max_res=resolution, val_res=resolution)
         datasets = ds_loader.get_datasets(data_dir="/work/", orig_data_dir="/data/image_classification/ImageNet")
-
         data_loaders = ds_loader.get_data_loaders(datasets, transforms, seed=42, valid_size=0.01, shuffle=True, num_workers=self.opts.workers, in_memory=True)
         self.train_dataloader, self.test_dataloader = data_loaders["train"], data_loaders["test"]
-        # self.train_dataset, self.test_dataset = self.configure_datasets()
-        # self.train_dataloader = DataLoader(self.train_dataset,
-        #                                    batch_size=self.opts.batch_size,
-        #                                    shuffle=True,
-        #                                    num_workers=int(self.opts.workers),
-        #                                    drop_last=True)
-        # self.test_dataloader = DataLoader(self.test_dataset,
-        #                                   batch_size=self.opts.test_batch_size,
-        #                                   shuffle=False,
-        #                                   num_workers=int(self.opts.test_workers),
-        #                                   drop_last=True)
 
         # Initialize logger
         log_dir = os.path.join(opts.exp_dir, 'logs')
@@ -101,6 +110,7 @@ class Coach:
 
         if self.opts.use_amp:
             self.scaler = GradScaler()
+        self.zero_out_grad = True
 
     def load_from_train_checkpoint(self, ckpt):
         print('Loading previous training data...')
@@ -132,18 +142,22 @@ class Coach:
                     loss_dict = {**loss_dict, **encoder_loss_dict}
                 if self.opts.use_amp:
                     losss = self.scaler.scale(loss) 
-                self.optimizer.zero_grad()
+                if self.zero_out_grad:
+                    self.optimizer.zero_grad()
+                    self.zero_out_grad = False
                 loss.backward()
-                if self.opts.use_amp:
-                    self.scaler.step(self.optimizer)
-                    self.scaler.update()
-                else:
-                    self.optimizer.step()
+                if self.global_step % self.opts.grad_accumulation_steps == 0:
+                    self.zero_out_grad = True
+                    if self.opts.use_amp:
+                        self.scaler.step(self.optimizer)
+                        self.scaler.update()
+                    else:
+                        self.optimizer.step()
 
                 # Logging related
                 if self.global_step % self.opts.image_interval == 0 or (
                         self.global_step < 1000 and self.global_step % 25 == 0):
-                    self.parse_and_log_images(id_logs, x, y, y_hat, title='images/train/faces')
+                    self.parse_and_log_images(id_logs, x, y, y_hat, title='images/train')
                 if self.global_step % self.opts.board_interval == 0:
                     self.print_metrics(loss_dict, prefix='train')
                     self.log_metrics(loss_dict, prefix='train')
@@ -185,14 +199,15 @@ class Coach:
             if self.is_training_discriminator():
                 cur_loss_dict = self.validate_discriminator(batch)
             with torch.no_grad():
-                x, y, y_hat, latent = self.forward(batch)
-                loss, cur_encoder_loss_dict, id_logs = self.calc_loss(x, y, y_hat, latent)
-                cur_loss_dict = {**cur_loss_dict, **cur_encoder_loss_dict}
+                with autocast() if self.opts.use_amp else nullcontext():
+                    x, y, y_hat, latent = self.forward(batch)
+                    loss, cur_encoder_loss_dict, id_logs = self.calc_loss(x, y, y_hat, latent)
+                    cur_loss_dict = {**cur_loss_dict, **cur_encoder_loss_dict}
             agg_loss_dict.append(cur_loss_dict)
 
             # Logging related
             self.parse_and_log_images(id_logs, x, y, y_hat,
-                                      title='images/test/faces',
+                                      title='images/test',
                                       subscript='{:04d}'.format(batch_idx))
 
             # For first step just do sanity test on small amount of data
@@ -220,11 +235,12 @@ class Coach:
                 f.write('Step - {}, \n{}\n'.format(self.global_step, loss_dict))
 
     def configure_optimizers(self):
-        params = list(self.net.encoder.parameters())
+        net = self.net.module if type(self.net) is nn.DataParallel else self.net
+        params = list(net.encoder.parameters())
         if self.opts.train_decoder:
-            params += list(self.net.decoder.parameters())
+            params += list(net.decoder.parameters())
         else:
-            self.requires_grad(self.net.decoder, False)
+            self.requires_grad(net.decoder, False)
         if self.opts.optim_name == 'adam':
             optimizer = torch.optim.Adam(params, lr=self.opts.learning_rate)
         else:
@@ -253,13 +269,14 @@ class Coach:
         return train_dataset, test_dataset
 
     def calc_loss(self, x, y, y_hat, latent):
+        net = self.net.module if type(self.net) is nn.DataParallel else self.net
         loss_dict = {}
         loss = 0.0
         id_logs = None
         if self.is_training_discriminator():  # Adversarial loss
             loss_disc = 0.
             dims_to_discriminate = self.get_dims_to_discriminate() if self.is_progressive_training() else \
-                list(range(self.net.decoder.n_latent))
+                list(range(net.decoder.n_latent))
 
             for i in dims_to_discriminate:
                 w = latent[:, i, :]
@@ -269,12 +286,12 @@ class Coach:
             loss_dict['encoder_discriminator_loss'] = float(loss_disc)
             loss += self.opts.w_discriminator_lambda * loss_disc
 
-        if self.opts.progressive_steps and self.net.encoder.progressive_stage.value != 18:  # delta regularization loss
+        if self.opts.progressive_steps and net.encoder.progressive_stage.value != 18 and not self.opts.encode_to_z:  # delta regularization loss
             total_delta_loss = 0
-            deltas_latent_dims = self.net.encoder.get_deltas_starting_dimensions()
+            deltas_latent_dims = net.encoder.get_deltas_starting_dimensions()
 
             first_w = latent[:, 0, :]
-            for i in range(1, self.net.encoder.progressive_stage.value + 1):
+            for i in range(1, net.encoder.progressive_stage.value + 1):
                 curr_dim = deltas_latent_dims[i]
                 delta = latent[:, curr_dim, :] - first_w
                 delta_loss = torch.norm(delta, self.opts.delta_norm, dim=1).mean()
@@ -300,18 +317,18 @@ class Coach:
         return loss, loss_dict, id_logs
 
     def forward(self, batch):
-        x, _ = batch
+        x, class_id = batch
         y = x  # This should be a different view?
         x, y = x.to(self.device).float(), y.to(self.device).float()
-        y_hat, latent = self.net.forward(x, return_latents=True)
+        y_hat, latent = self.net.forward(x, class_id, return_latents=True)
         # if self.opts.dataset_type == "cars_encode":
         #     y_hat = y_hat[:, :, 32:224, :]
         return x, y, y_hat, latent
 
     def log_metrics(self, metrics_dict, prefix):
-        # for key, value in metrics_dict.items():
-            # self.logger.add_scalar('{}/{}'.format(prefix, key), value, self.global_step)
-        pass
+        wandb.log(metrics_dict, step=self.global_step)
+        if self.trigger_sync is not None:
+            self.trigger_sync() 
 
     def print_metrics(self, metrics_dict, prefix):
         print('Metrics for {}, step {}'.format(prefix, self.global_step))
@@ -322,37 +339,38 @@ class Coach:
         im_data = []
         for i in range(display_count):
             cur_im_data = {
-                'input_face': common.log_input_image(x[i], self.opts),
-                'target_face': common.tensor2im(y[i]),
-                'output_face': common.tensor2im(y_hat[i]),
+                'input_image': common.log_input_image(x[i], self.opts),
+                'target_image': common.tensor2im(y[i]),
+                'output_image': common.tensor2im(y_hat[i]),
             }
             if id_logs is not None:
                 for key in id_logs[i]:
                     cur_im_data[key] = id_logs[i][key]
             im_data.append(cur_im_data)
-        # self.log_images(title, im_data=im_data, subscript=subscript)
+        self.log_images(title, im_data=im_data, subscript=subscript)
 
     def log_images(self, name, im_data, subscript=None, log_latest=False):
         fig = common.vis_faces(im_data)
         step = self.global_step
         if log_latest:
             step = 0
-        # if subscript:
-        #     path = os.path.join(self.logger.log_dir, name, '{}_{:04d}.jpg'.format(subscript, step))
-        # else:
-        #     path = os.path.join(self.logger.log_dir, name, '{:04d}.jpg'.format(step))
+        if subscript:
+            path = os.path.join(self.opts.exp_dir, name, '{}_{:04d}.jpg'.format(subscript, step))
+        else:
+            path = os.path.join(self.opts.exp_dir, name, '{:04d}.jpg'.format(step))
         os.makedirs(os.path.dirname(path), exist_ok=True)
         fig.savefig(path)
         plt.close(fig)
 
     def __get_save_dict(self):
+        net = self.net.module if type(self.net) is nn.DataParallel else self.net
         save_dict = {
-            'state_dict': self.net.state_dict(),
+            'state_dict': net.state_dict(),
             'opts': vars(self.opts)
         }
         # save the latent avg in state_dict for inference if truncation of w was used during training
         if self.opts.start_from_latent_avg:
-            save_dict['latent_avg'] = self.net.latent_avg
+            save_dict['latent_avg'] = net.latent_avg
 
         if self.opts.save_training_data:  # Save necessary information to enable training continuation from checkpoint
             save_dict['global_step'] = self.global_step
@@ -364,8 +382,9 @@ class Coach:
         return save_dict
 
     def get_dims_to_discriminate(self):
-        deltas_starting_dimensions = self.net.encoder.get_deltas_starting_dimensions()
-        return deltas_starting_dimensions[:self.net.encoder.progressive_stage.value + 1]
+        net = self.net.module if type(self.net) is nn.DataParallel else self.net
+        deltas_starting_dimensions = net.encoder.get_deltas_starting_dimensions()
+        return deltas_starting_dimensions[:net.encoder.progressive_stage.value + 1]
 
     def is_progressive_training(self):
         return self.opts.progressive_steps is not None
@@ -373,7 +392,7 @@ class Coach:
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ Discriminator ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ #
 
     def is_training_discriminator(self):
-        return self.opts.w_discriminator_lambda > 0
+        return self.opts.w_discriminator_lambda > 0 and not self.opts.encode_to_z
 
     @staticmethod
     def discriminator_loss(real_pred, fake_pred, loss_dict):
@@ -448,14 +467,18 @@ class Coach:
             return loss_dict
 
     def sample_real_and_fake_latents(self, x):
-        z_dim = self.net.decoder.z_dim 
-        c_dim = self.net.decoder.c_dim 
+        net = self.net.module if type(self.net) is nn.DataParallel else self.net
+        z_dim = net.decoder.z_dim 
+        c_dim = net.decoder.c_dim 
         sample_z = torch.randn(self.opts.batch_size, z_dim, device=self.device)
-        sample_c = torch.randn(self.opts.batch_size, c_dim, device=self.device)  #TODO pass through learned embedder?
-        real_w = self.net.decoder.get_latent(sample_z, sample_c)
-        fake_w = self.net.encoder(x)
+        sample_c_idx = torch.randint(0, c_dim, (self.opts.batch_size,), device=self.device)
+        sample_c = torch.nn.functional.one_hot(sample_c_idx, num_classes=c_dim).float()
+        real_w = net.decoder.get_latent(sample_z, sample_c)
+        fake_w = net.encoder(x)
         if self.opts.start_from_latent_avg:
-            fake_w = fake_w + self.net.latent_avg.repeat(fake_w.shape[0], 1, 1)
+            # sample random cl
+            sampled_avg = net.latent_avg[sample_c_idx]
+            fake_w = fake_w + sampled_avg #self.net.latent_avg[sample_c_idx]
         if self.is_progressive_training():  # When progressive training, feed only unique w's
             dims_to_discriminate = self.get_dims_to_discriminate()
             fake_w = fake_w[:, dims_to_discriminate, :]
