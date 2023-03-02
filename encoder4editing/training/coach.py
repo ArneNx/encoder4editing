@@ -7,7 +7,7 @@ import wandb
 matplotlib.use('Agg')
 
 import torch
-from torch import nn, autograd
+from torch import nn, autograd, optim
 from torch.utils.data import DataLoader
 # from torch.utils.tensorboard import SummaryWriter
 import torch.nn.functional as F
@@ -73,6 +73,7 @@ class Coach:
 
         # Initialize optimizer
         self.optimizer = self.configure_optimizers()
+        self.lr_scheduler = self.configure_lr_scheduler()
 
         # Initialize discriminator
         if self.opts.w_discriminator_lambda > 0:
@@ -140,6 +141,7 @@ class Coach:
                     x, y, y_hat, latent = self.forward(batch)
                     loss, encoder_loss_dict, id_logs = self.calc_loss(x, y, y_hat, latent)
                     loss_dict = {**loss_dict, **encoder_loss_dict}
+                    loss_dict['lr'] = self.optimizer.param_groups[0]['lr']
                 if self.opts.use_amp:
                     losss = self.scaler.scale(loss) 
                 if self.zero_out_grad:
@@ -153,6 +155,8 @@ class Coach:
                         self.scaler.update()
                     else:
                         self.optimizer.step()
+                if self.lr_scheduler is not None:
+                    self.lr_scheduler.step()
 
                 # Logging related
                 if self.global_step % self.opts.image_interval == 0 or (
@@ -242,10 +246,29 @@ class Coach:
         else:
             self.requires_grad(net.decoder, False)
         if self.opts.optim_name == 'adam':
-            optimizer = torch.optim.Adam(params, lr=self.opts.learning_rate)
+            optimizer = optim.Adam(params, lr=self.opts.learning_rate)
         else:
             optimizer = Ranger(params, lr=self.opts.learning_rate)
         return optimizer
+
+    def configure_lr_scheduler(self):
+        lr_scheduler = None
+        if self.opts.lr_scheduler == "cosine":
+            lr_scheduler = optim.lr_scheduler.CosineAnnealingLR(
+                self.optimizer,
+                T_max=self.opts.max_steps-self.opts.lr_warmup,
+                eta_min=0.0000001,
+            )
+        elif self.opts.lr_scheduler != "":
+            raise ValueError("Unknown lr_scheduler: {}".format(self.opts.lr_scheduler))
+        if self.opts.lr_warmup:
+            warmup_lr_scheduler = torch.optim.lr_scheduler.LinearLR(
+                self.optimizer, start_factor=1.0/self.opts.lr_warmup, total_iters=self.opts.lr_warmup-1 
+            )
+            lr_scheduler = torch.optim.lr_scheduler.SequentialLR(self.optimizer, 
+            [warmup_lr_scheduler, lr_scheduler], 
+            milestones=[self.opts.lr_warmup])
+        return lr_scheduler
 
     def configure_datasets(self):
         if self.opts.dataset_type not in data_configs.DATASETS.keys():

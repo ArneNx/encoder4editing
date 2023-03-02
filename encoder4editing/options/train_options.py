@@ -55,6 +55,10 @@ class TrainOptions:
                                  help='Whether to store a latnet codes pool for the discriminator\'s training')
         self.parser.add_argument("--w_pool_size", type=int, default=50,
                                  help="W\'s pool size, depends on --use_w_pool")
+        self.parser.add_argument('--lr_scheduler', default="", type=str,
+                                 help='lr scheduler')
+        self.parser.add_argument('--lr_warmup', default=0, type=int,
+                                 help='lr warmup setps')
 
         # e4e specific
         self.parser.add_argument('--delta_norm', type=int, default=2, help="norm type of the deltas")
