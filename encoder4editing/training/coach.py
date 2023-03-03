@@ -161,7 +161,7 @@ class Coach:
                 # Logging related
                 if self.global_step % self.opts.image_interval == 0 or (
                         self.global_step < 1000 and self.global_step % 25 == 0):
-                    self.parse_and_log_images(id_logs, x, y, y_hat, title='images/train')
+                    self.parse_and_log_images(id_logs, x, y, y_hat, title='train')
                 if self.global_step % self.opts.board_interval == 0:
                     self.print_metrics(loss_dict, prefix='train')
                     self.log_metrics(loss_dict, prefix='train')
@@ -210,9 +210,11 @@ class Coach:
             agg_loss_dict.append(cur_loss_dict)
 
             # Logging related
-            self.parse_and_log_images(id_logs, x, y, y_hat,
-                                      title='images/test',
-                                      subscript='{:04d}'.format(batch_idx))
+            if batch_idx < self.opts.image_interval:
+                self.parse_and_log_images(id_logs, x, y, y_hat,
+                                        title='test',
+                                        subscript='{:04d}'.format(batch_idx),
+                                        offset=batch_idx)
 
             # For first step just do sanity test on small amount of data
             if self.global_step == 0 and batch_idx >= 4:
@@ -358,7 +360,7 @@ class Coach:
         for key, value in metrics_dict.items():
             print('\t{} = '.format(key), value)
 
-    def parse_and_log_images(self, id_logs, x, y, y_hat, title, subscript=None, display_count=2):
+    def parse_and_log_images(self, id_logs, x, y, y_hat, title, subscript=None, display_count=2, offset=0):
         im_data = []
         for i in range(display_count):
             cur_im_data = {
@@ -370,19 +372,21 @@ class Coach:
                 for key in id_logs[i]:
                     cur_im_data[key] = id_logs[i][key]
             im_data.append(cur_im_data)
-        self.log_images(title, im_data=im_data, subscript=subscript)
+        self.log_images(title, im_data=im_data, subscript=subscript, offset=offset)
 
-    def log_images(self, name, im_data, subscript=None, log_latest=False):
-        fig = common.vis_faces(im_data)
+    def log_images(self, name, im_data, subscript=None, log_latest=False, offset=0):
         step = self.global_step
         if log_latest:
             step = 0
-        if subscript:
-            path = os.path.join(self.opts.exp_dir, name, '{}_{:04d}.jpg'.format(subscript, step))
-        else:
-            path = os.path.join(self.opts.exp_dir, name, '{:04d}.jpg'.format(step))
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        fig.savefig(path)
+        fig = common.vis_faces(im_data)
+        images = wandb.Image(fig, caption=f"{step}")
+        wandb.log({name: images}, step=step+offset)
+        # if subscript:
+        #     path = os.path.join(self.opts.exp_dir, name, '{}_{:04d}.jpg'.format(subscript, step))
+        # else:
+        #     path = os.path.join(self.opts.exp_dir, name, '{:04d}.jpg'.format(step))
+        # os.makedirs(os.path.dirname(path), exist_ok=True)
+        # fig.savefig(path)
         plt.close(fig)
 
     def __get_save_dict(self):
