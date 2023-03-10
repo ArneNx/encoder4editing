@@ -10,7 +10,7 @@ from encoder4editing.models.encoders import psp_encoders
 from encoder4editing.configs.paths_config import model_paths
 import legacy
 from .generator_wrapper import GeneratorWrapper
-
+from .utils import load_state_dict
 from torch.cuda.amp import autocast
 
 def get_keys(d, name):
@@ -34,11 +34,10 @@ class pSp(nn.Module):
         if not os.path.isfile(network_pkl):
             raise Exception(f"File {network_pkl} does not exist. Please download it from the StyleGAN-XL repo.")
         print('Loading networks from "%s"...' % network_pkl)
-        device = torch.device('cuda')
+        # device = torch.device('cuda')
         with open(network_pkl, "rb") as fp:
-            generator = legacy.load_network_pkl(fp)['G_ema'].to(device) 
-        self.decoder = GeneratorWrapper(generator, device)
-        print(self.decoder) 
+            generator = legacy.load_network_pkl(fp)['G_ema']# .to(device) 
+        self.decoder = GeneratorWrapper(generator)
         
         self.encoder = self.set_encoder(num_ws=self.decoder.generator.num_ws)
         # self.face_pool = torch.nn.AdaptiveAvgPool2d((256, 256))
@@ -57,16 +56,15 @@ class pSp(nn.Module):
             encoder = psp_encoders.SimpleLatentEncoder(50, self.decoder.z_dim, "ir_se", self.opts, )
         else:
             raise Exception('{} is not a valid encoders'.format(self.opts.encoder_type))
-        print(encoder)
         return encoder
 
     def load_weights(self):
         if self.opts.checkpoint_path is not None:
             print('Loading e4e over the pSp framework from checkpoint: {}'.format(self.opts.checkpoint_path))
             ckpt = torch.load(self.opts.checkpoint_path, map_location='cpu')
-            self.encoder.load_state_dict(get_keys(ckpt, 'encoder'), strict=True)
+            load_state_dict(self.encoder, get_keys(ckpt, 'encoder'), ignore_missing=True)
+            # self.encoder.load_state_dict(get_keys(ckpt, 'encoder'), strict=True)
             # self.decoder.load_state_dict(get_keys(ckpt, 'decoder'), strict=True)
-            self.__load_latent_avg(ckpt)
         else:
             print('Loading encoders weights from irse50!')
             encoder_ckpt = torch.load(model_paths['ir_se50'])
@@ -74,7 +72,8 @@ class pSp(nn.Module):
             # print('Loading decoder weights from pretrained!')
             # ckpt = torch.load(self.opts.stylegan_weights)
             # self.decoder.load_state_dict(ckpt['g_ema'], strict=False)
-            self.__load_latent_avg({})
+            # self.__load_latent_avg({})
+        self.__load_latent_avg({})
 
     def forward(self, x, class_id, resize=True, latent_mask=None, input_code=False, randomize_noise=True,
                 inject_latent=None, return_latents=False, alpha=None):
@@ -85,7 +84,7 @@ class pSp(nn.Module):
         #     codes = self.encoder(x)
         #     # normalize with respect to the center of an average face
         if self.opts.start_from_latent_avg:
-            latent_avg = self.latent_avg[class_id]
+            latent_avg = self.latent_avg.to(x.device)[class_id]
             codes = codes + latent_avg
         #         if codes.ndim == 2:
         #             codes = codes + self.latent_avg.repeat(codes.shape[0], 1, 1)[:, 0, :]
@@ -119,12 +118,12 @@ class pSp(nn.Module):
 
     def __load_latent_avg(self, ckpt, repeat=None):
         if 'latent_avg' in ckpt:
-            self.latent_avg = ckpt['latent_avg'].to(self.opts.device)
+            self.latent_avg = ckpt['latent_avg']
         elif self.opts.start_from_latent_avg:
             # Compute mean code based on a large number of latents (10,000 here)
             with torch.no_grad():
                 with autocast() if self.opts.use_amp else nullcontext():
-                    self.latent_avg = self.decoder.mean_latent(10).to(self.opts.device)
+                    self.latent_avg = self.decoder.mean_latent(1000)
         else:
             self.latent_avg = None
         if repeat is not None and self.latent_avg is not None:

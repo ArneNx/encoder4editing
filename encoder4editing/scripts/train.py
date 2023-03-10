@@ -28,6 +28,8 @@ def main():
 	previous_train_ckpt = None
 	if opts.resume_training_from_ckpt:
 		opts, previous_train_ckpt = load_train_checkpoint(opts)
+		if not opts.checkpoint_path:
+			opts.checkpoint_path = opts.resume_training_from_ckpt
 	else:
 		setup_progressive_steps(opts)
 		create_initial_experiment_dir(opts)

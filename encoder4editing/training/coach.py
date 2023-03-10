@@ -1,5 +1,6 @@
 import os
 import random
+import time
 import matplotlib
 import matplotlib.pyplot as plt
 from contextlib import nullcontext
@@ -54,11 +55,11 @@ class Coach:
         self.trigger_sync = trigger_sync
         self.global_step = 0
 
-        self.device = 'cuda:0'
-        self.opts.device = self.device
+        # self.device = 'cuda:0'
+        # self.opts.device = self.device
         # Initialize network
         self.net, self.device = move_to_device(pSp(self.opts))
-        self.opts.device = self.device
+        # self.opts.device = self.device
 
         # Initialize loss
         if self.opts.lpips_lambda > 0:
@@ -129,6 +130,7 @@ class Coach:
         print(f'Resuming training from step {self.global_step}')
 
     def train(self):
+        self.start_time = time.time()
         self.net.train()
         if self.opts.progressive_steps:
             self.check_for_progressive_training_update()
@@ -165,6 +167,8 @@ class Coach:
                 if self.global_step % self.opts.board_interval == 0:
                     self.print_metrics(loss_dict, prefix='train')
                     self.log_metrics(loss_dict, prefix='train')
+                    print("Time taken for step: ", time.time() - self.start_time)
+                    self.start_time = time.time()
 
                 # Validation related
                 val_loss_dict = None
@@ -497,14 +501,15 @@ class Coach:
         net = self.net.module if type(self.net) is nn.DataParallel else self.net
         z_dim = net.decoder.z_dim 
         c_dim = net.decoder.c_dim 
-        sample_z = torch.randn(self.opts.batch_size, z_dim, device=self.device)
-        sample_c_idx = torch.randint(0, c_dim, (self.opts.batch_size,), device=self.device)
+        sample_z = torch.randn(self.opts.batch_size, z_dim, device=x.device)
+        sample_c_idx = torch.randint(0, c_dim, (self.opts.batch_size,), device=x.device)
         sample_c = torch.nn.functional.one_hot(sample_c_idx, num_classes=c_dim).float()
         real_w = net.decoder.get_latent(sample_z, sample_c)
         fake_w = net.encoder(x)
         if self.opts.start_from_latent_avg:
             # sample random cl
-            sampled_avg = net.latent_avg[sample_c_idx]
+            latent_avg = net.latent_avg.to(x.device)
+            sampled_avg = latent_avg[sample_c_idx]
             fake_w = fake_w + sampled_avg #self.net.latent_avg[sample_c_idx]
         if self.is_progressive_training():  # When progressive training, feed only unique w's
             dims_to_discriminate = self.get_dims_to_discriminate()

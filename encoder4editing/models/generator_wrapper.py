@@ -5,17 +5,17 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 class GeneratorWrapper(nn.Module):
-    def __init__(self, generator, device) -> None:
+    def __init__(self, generator) -> None:
         super().__init__()
-        self.device = device
+        # self.device = device
         self.generator = generator
         self.z_dim = generator.z_dim
         self.c_dim = generator.c_dim
         self.n_latent = generator.num_ws
 
     def mean_latent(self, n_sample):
-        latent_in = torch.randn(n_sample, 1000, self.z_dim, device=self.device)
-        class_ids = torch.arange(1000, device=self.device)
+        latent_in = torch.randn(n_sample, 1000, self.z_dim)
+        class_ids = torch.arange(1000)
         class_ids = torch.nn.functional.one_hot(class_ids, num_classes=1000)
         latent_out = 0.0
         for i in range(n_sample):
